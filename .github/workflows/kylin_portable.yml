@@ -14,6 +14,26 @@ env:
   REBASED_VERSION: '1.1.23'
 
 jobs:
+  fetch-zh-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify localization-zh.jar from IntelliJ IDEA 2026.2.4
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o idea.tar.gz https://download.jetbrains.com/idea/idea-2026.2.4.tar.gz
+          echo "cc6b29ddb82c7dcc656d5c728cefb2c917ac767eb4b8368f1208732846fbb5bd  idea.tar.gz" | sha256sum -c -
+          mkdir -p zh-extract
+          tar -xzf idea.tar.gz -C zh-extract --strip-components=4 --wildcards '*/plugins/localization-zh/lib/localization-zh.jar'
+          echo "a02ea80d26aad8ea8d167fa7418075c93c5f3e3566218d197becb85c45cb88bf  zh-extract/localization-zh.jar" | sha256sum -c -
+          rm -f idea.tar.gz
+      - name: Upload localization-zh-original artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: localization-zh-original
+          if-no-files-found: 'error'
+          retention-days: 1
+          path: zh-extract/localization-zh.jar
+
   unit-tests:
     runs-on: ubuntu-latest
     steps:
@@ -26,11 +46,17 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    needs: fetch-zh-plugin
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: ./.github/actions/free_disk_space_and_expand_swap
+      - name: Download localization-zh-original artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: localization-zh-original
+          path: out/zh-plugin
       - name: Build Docker image
         run: docker build . --target intellij_idea --tag intellij_idea
       - name: Build Rebased Linux x64 distribution
@@ -46,6 +72,8 @@ jobs:
           --version "$REBASED_VERSION"
           --suffix "kylin.${{ github.run_number }}"
           --out out/kylin
+          --zh-plugin-jar out/zh-plugin/localization-zh.jar
+          --zh-overlay .github/kylin/l10n-zh
       - name: Upload Kylin portable artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

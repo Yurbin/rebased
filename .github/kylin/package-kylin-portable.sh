@@ -6,6 +6,8 @@ INPUT_TAR=""
 VERSION=""
 SUFFIX=""
 OUT_DIR=""
+ZH_PLUGIN_JAR=""
+ZH_OVERLAY_DIR=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -25,9 +27,17 @@ while [ $# -gt 0 ]; do
       OUT_DIR="${2:-}"
       shift 2
       ;;
+    --zh-plugin-jar)
+      ZH_PLUGIN_JAR="${2:-}"
+      shift 2
+      ;;
+    --zh-overlay)
+      ZH_OVERLAY_DIR="${2:-}"
+      shift 2
+      ;;
     *)
       echo "ERROR: Unknown argument: $1" >&2
-      echo "Usage: $0 --input <rebased.tar.gz> --version <x.y.z> --suffix <suffix> --out <dir>" >&2
+      echo "Usage: $0 --input <rebased.tar.gz> --version <x.y.z> --suffix <suffix> --out <dir> [--zh-plugin-jar <jar> --zh-overlay <dir>]" >&2
       exit 1
       ;;
   esac
@@ -35,7 +45,12 @@ done
 
 if [ -z "$INPUT_TAR" ] || [ -z "$VERSION" ] || [ -z "$SUFFIX" ] || [ -z "$OUT_DIR" ]; then
   echo "ERROR: Missing required arguments." >&2
-  echo "Usage: $0 --input <rebased.tar.gz> --version <x.y.z> --suffix <suffix> --out <dir>" >&2
+  echo "Usage: $0 --input <rebased.tar.gz> --version <x.y.z> --suffix <suffix> --out <dir> [--zh-plugin-jar <jar> --zh-overlay <dir>]" >&2
+  exit 1
+fi
+
+if { [ -n "$ZH_PLUGIN_JAR" ] && [ -z "$ZH_OVERLAY_DIR" ]; } || { [ -z "$ZH_PLUGIN_JAR" ] && [ -n "$ZH_OVERLAY_DIR" ]; }; then
+  echo "ERROR: --zh-plugin-jar and --zh-overlay must be provided together." >&2
   exit 1
 fi
 
@@ -44,9 +59,23 @@ if [ ! -f "$INPUT_TAR" ]; then
   exit 1
 fi
 
+if [ -n "$ZH_PLUGIN_JAR" ]; then
+  if [ ! -f "$ZH_PLUGIN_JAR" ]; then
+    echo "ERROR: Chinese language pack jar does not exist: $ZH_PLUGIN_JAR" >&2
+    exit 1
+  fi
+  if [ ! -d "$ZH_OVERLAY_DIR" ]; then
+    echo "ERROR: Chinese language pack overlay directory does not exist: $ZH_OVERLAY_DIR" >&2
+    exit 1
+  fi
+  ZH_PLUGIN_JAR="$(cd "$(dirname "$ZH_PLUGIN_JAR")" && pwd)/$(basename "$ZH_PLUGIN_JAR")"
+  ZH_OVERLAY_DIR="$(cd "$ZH_OVERLAY_DIR" && pwd)"
+fi
+
 INPUT_TAR="$(cd "$(dirname "$INPUT_TAR")" && pwd)/$(basename "$INPUT_TAR")"
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ARCH="amd64"
 PORTABLE_NAME="rebased-${VERSION}-${SUFFIX}_linux_${ARCH}_portable"
@@ -66,6 +95,20 @@ rm -f "$OUT_TAR" "$OUT_SHA256"
 echo "Extracting input archive: $INPUT_TAR"
 tar -xzf "$INPUT_TAR" -C "$STAGE_DIR" --strip-components=1
 
+echo "Reading productVendor and dataDirectoryName from product-info.json..."
+PRODUCT_INFO_JSON="$STAGE_DIR/product-info.json"
+if [ ! -f "$PRODUCT_INFO_JSON" ]; then
+  echo "ERROR: Missing $PRODUCT_INFO_JSON in extracted distribution" >&2
+  exit 1
+fi
+PRODUCT_VENDOR="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["productVendor"])' "$PRODUCT_INFO_JSON")"
+DATA_DIR_NAME="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["dataDirectoryName"])' "$PRODUCT_INFO_JSON")"
+if [ -z "$PRODUCT_VENDOR" ] || [ -z "$DATA_DIR_NAME" ]; then
+  echo "ERROR: Failed to read productVendor or dataDirectoryName from $PRODUCT_INFO_JSON" >&2
+  exit 1
+fi
+echo "Detected product paths: vendor=${PRODUCT_VENDOR}, dataDirectoryName=${DATA_DIR_NAME}"
+
 echo "Verifying compareWithRef classes in vcs-git.jar..."
 VCS_GIT_JAR="$STAGE_DIR/plugins/vcs-git/lib/vcs-git.jar"
 if [ ! -f "$VCS_GIT_JAR" ]; then
@@ -77,6 +120,17 @@ if ! unzip -l "$VCS_GIT_JAR" | grep -q "git4idea/actions/compareWithRef/"; then
   exit 1
 fi
 echo "Verified compareWithRef classes in vcs-git.jar."
+
+if [ -n "$ZH_PLUGIN_JAR" ]; then
+  echo "Patching and bundling Chinese language pack..."
+  python3 "$SCRIPT_DIR/patch-zh-plugin.py" \
+    --jar "$ZH_PLUGIN_JAR" \
+    --overlay "$ZH_OVERLAY_DIR" \
+    --dist "$STAGE_DIR" \
+    --out "$STAGE_DIR/extra-plugins/localization-zh/lib/localization-zh.jar"
+else
+  echo "Skipping Chinese language pack."
+fi
 
 echo "Checking max GLIBC version across all ELF files..."
 MAX_GLIBC=$(
@@ -101,7 +155,6 @@ fi
 echo "Copying top-level icon..."
 cp -f "$STAGE_DIR/bin/rebased.png" "$STAGE_DIR/rebased.png"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/make-filter-demo-repo.sh" ]; then
   mkdir -p "$STAGE_DIR/.github/kylin"
   cp -f "$SCRIPT_DIR/make-filter-demo-repo.sh" "$STAGE_DIR/.github/kylin/make-filter-demo-repo.sh"
@@ -141,7 +194,14 @@ WM_CLASS="jetbrains-rebased"
 ICON_FILE="$APP_DIR/rebased.png"
 ESCAPED_LAUNCHER="$(escape_desktop_exec_arg "$APP_DIR/rebased")"
 
+PRODUCT_VENDOR="__PRODUCT_VENDOR__"
+DATA_DIR_NAME="__DATA_DIR_NAME__"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+PLUGINS_DIR="$XDG_DATA_HOME/$PRODUCT_VENDOR/$DATA_DIR_NAME"
+CONFIG_DIR="$XDG_CONFIG_HOME/$PRODUCT_VENDOR/$DATA_DIR_NAME"
+CACHE_DIR="$XDG_CACHE_HOME/$PRODUCT_VENDOR/$DATA_DIR_NAME"
 APPS_DIR="$XDG_DATA_HOME/applications"
 ICON_128_DIR="$XDG_DATA_HOME/icons/hicolor/128x128/apps"
 
@@ -150,17 +210,18 @@ if [ "${1:-}" = "--uninstall" ]; then
         "$APPS_DIR/${APP_ID}-uninstall.desktop" \
         "$APPS_DIR/${WM_CLASS}.desktop" \
         "$ICON_128_DIR/${APP_ID}.png" || warn "Failed to remove some desktop integration files."
+  rm -rf "$PLUGINS_DIR/localization-zh" || warn "Failed to remove $PLUGINS_DIR/localization-zh."
   if command -v xdg-desktop-menu >/dev/null 2>&1; then
     xdg-desktop-menu forceupdate --mode user || warn "xdg-desktop-menu forceupdate failed."
   fi
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APPS_DIR" || warn "update-desktop-database failed."
   fi
-  echo "[已卸载] 已移除 Rebased 用户级开始菜单快捷方式与图标。"
+  echo "[已卸载] 已移除 Rebased 用户级开始菜单快捷方式、图标与中文语言包插件。"
   echo "如需彻底清理程序与个人数据，请手动删除："
   echo "  1. 程序目录: $APP_DIR"
-  echo "  2. 配置目录: ${XDG_CONFIG_HOME:-$HOME/.config}/detachhead/IdeaIC1.1"
-  echo "  3. 缓存目录: ${XDG_CACHE_HOME:-$HOME/.cache}/detachhead/IdeaIC1.1"
+  echo "  2. 配置目录: $CONFIG_DIR"
+  echo "  3. 缓存目录: $CACHE_DIR"
   exit 0
 fi
 
@@ -219,6 +280,43 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$APPS_DIR" || warn "update-desktop-database failed."
 fi
 
+# Initialize default Simplified Chinese locale on first run and sync bundled localization-zh plugin.
+EXTRA_ZH_DIR="$APP_DIR/extra-plugins/localization-zh"
+EXTRA_ZH_JAR="$EXTRA_ZH_DIR/lib/localization-zh.jar"
+if [ -d "$EXTRA_ZH_DIR" ] && [ -f "$EXTRA_ZH_JAR" ]; then
+  if [ ! -d "$CONFIG_DIR" ]; then
+    if mkdir -p "$CONFIG_DIR"; then
+      printf 'i18n.locale\nzh-CN\n' > "$CONFIG_DIR/early-access-registry.txt" || warn "Failed to write $CONFIG_DIR/early-access-registry.txt"
+    else
+      warn "Failed to create $CONFIG_DIR"
+    fi
+  fi
+
+  TARGET_ZH_DIR="$PLUGINS_DIR/localization-zh"
+  TARGET_ZH_JAR="$TARGET_ZH_DIR/lib/localization-zh.jar"
+  NEED_SYNC=1
+  if [ -f "$TARGET_ZH_JAR" ] && command -v cmp >/dev/null 2>&1; then
+    if cmp -s "$EXTRA_ZH_JAR" "$TARGET_ZH_JAR"; then
+      NEED_SYNC=0
+    fi
+  fi
+
+  if [ "$NEED_SYNC" -eq 1 ]; then
+    if mkdir -p "$PLUGINS_DIR"; then
+      TMP_ZH_DIR="$PLUGINS_DIR/.localization-zh.tmp.$$"
+      rm -rf "$TMP_ZH_DIR"
+      if cp -R "$EXTRA_ZH_DIR" "$TMP_ZH_DIR"; then
+        rm -rf "$TARGET_ZH_DIR" && mv "$TMP_ZH_DIR" "$TARGET_ZH_DIR" || warn "Failed to replace $TARGET_ZH_DIR"
+      else
+        rm -rf "$TMP_ZH_DIR"
+        warn "Failed to copy $EXTRA_ZH_DIR to $TMP_ZH_DIR"
+      fi
+    else
+      warn "Failed to create $PLUGINS_DIR"
+    fi
+  fi
+fi
+
 export IDEA_RESTART_VIA_EXIT_CODE=88
 while true; do
   set +e
@@ -237,6 +335,9 @@ cat > "$STAGE_DIR/check-deps.sh" <<'EOF'
 # Rebased 银河麒麟桌面 V10 SP1 (x86_64) 离线环境依赖断言检测脚本
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+PRODUCT_VENDOR="__PRODUCT_VENDOR__"
+DATA_DIR_NAME="__DATA_DIR_NAME__"
+PLUGINS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$PRODUCT_VENDOR/$DATA_DIR_NAME"
 fail=0
 
 echo "=== 1. CPU 架构检测 ==="
@@ -336,6 +437,20 @@ else
 fi
 
 echo ""
+echo "=== 8. 中文语言包检测 ==="
+BUNDLED_ZH_JAR="$SELF_DIR/extra-plugins/localization-zh/lib/localization-zh.jar"
+INSTALLED_ZH_JAR="$PLUGINS_DIR/localization-zh/lib/localization-zh.jar"
+if [ -f "$BUNDLED_ZH_JAR" ]; then
+  if [ -f "$INSTALLED_ZH_JAR" ] && cmp -s "$BUNDLED_ZH_JAR" "$INSTALLED_ZH_JAR"; then
+    echo "[OK] 中文语言包已同步: $INSTALLED_ZH_JAR"
+  else
+    echo "[未同步] 请运行一次 ./rebased"
+  fi
+else
+  echo "[提示] 本包不含中文语言包"
+fi
+
+echo ""
 if [ "$fail" -eq 0 ]; then
   echo ">>> 所有检测通过！可以直接运行 ./rebased 启动程序。"
 else
@@ -343,6 +458,19 @@ else
 fi
 exit "$fail"
 EOF
+
+python3 - "$STAGE_DIR/rebased" "$STAGE_DIR/check-deps.sh" "$PRODUCT_VENDOR" "$DATA_DIR_NAME" <<'PYEOF'
+import sys
+from pathlib import Path
+
+vendor = sys.argv[3]
+data_dir = sys.argv[4]
+for file_path in sys.argv[1:3]:
+    p = Path(file_path)
+    text = p.read_text(encoding="utf-8")
+    text = text.replace("__PRODUCT_VENDOR__", vendor).replace("__DATA_DIR_NAME__", data_dir)
+    p.write_text(text, encoding="utf-8")
+PYEOF
 
 echo "Generating Chinese user guide (启动说明.txt)..."
 cat > "$STAGE_DIR/启动说明.txt" <<EOF
@@ -380,18 +508,29 @@ cat > "$STAGE_DIR/启动说明.txt" <<EOF
 ------------------------------------------------------------------------
 - 在项目目录右键 -> Git -> Compare with Branch or Tag… 选择目标分支后，
   弹出的 Changes 面板顶部工具栏提供：
-  1. User 过滤按钮：支持按参与修改的作者单选/多选过滤变更文件；
-  2. Copy Paths 按钮（及右键菜单 Copy Paths by Change Type）：将当前过滤后
-     的文件相对路径按 [新增]、[修改]、[重命名/移动]、[删除] 分组复制到剪贴板。
+  1. User（用户）过滤按钮：与 Log 面板交互一致，支持直接打字搜索作者、
+     选择 me（当前 Git 用户）、查看 Recent（最近过滤记录）或点击 Select…
+     多选作者；每次过滤变更后文件差异树会自动全部展开。
+  2. Copy Paths（复制路径）按钮及右键菜单：将当前过滤后的文件相对路径按
+     [新增]、[修改]、[重命名/移动]、[删除] 分组复制到剪贴板。
 
 四、卸载与清理方式
 ------------------------------------------------------------------------
-1. 移除开始菜单图标：
+1. 移除开始菜单图标与中文语言包插件：
    在开始菜单点击「卸载 Rebased」，或在终端执行：
    ./rebased --uninstall
 2. 彻底删除：
    直接删除本程序文件夹即可。
-   （个人配置文件位于 ~/.config/detachhead/IdeaIC1.1，缓存位于 ~/.cache/detachhead/IdeaIC1.1）
+   （个人配置文件位于 ~/.config/${PRODUCT_VENDOR}/${DATA_DIR_NAME}，缓存位于 ~/.cache/${PRODUCT_VENDOR}/${DATA_DIR_NAME}）
+
+五、中文界面
+------------------------------------------------------------------------
+1. 首次运行（当前用户尚无配置目录 ~/.config/${PRODUCT_VENDOR}/${DATA_DIR_NAME}）时，
+   启动脚本会自动同步内置简体中文语言包并将界面语言默认设为简体中文。
+2. 如已有历史配置目录，启动脚本不会覆盖您当前的语言设置。您可在程序内打开：
+   Settings / 设置 -> Appearance & Behavior / 外观与行为 -> System Settings / 系统设置 -> Language and Region / 语言和地区，
+   在 Language / 语言下拉框中切换「简体中文」或「English」。
+3. 切换界面语言后，需按提示重启 Rebased 生效。
 EOF
 
 chmod +x "$STAGE_DIR/rebased" "$STAGE_DIR/check-deps.sh"
