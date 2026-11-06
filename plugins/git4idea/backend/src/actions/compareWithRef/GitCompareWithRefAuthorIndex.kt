@@ -40,12 +40,6 @@ internal data class GitCompareAuthor(
         else -> trimmedEmail
       }
     }
-
-  val shortName: String
-    get() {
-      val trimmedName = name.trim()
-      return if (trimmedName.isNotEmpty()) trimmedName else email.trim()
-    }
 }
 
 internal data class PathPair(
@@ -68,14 +62,8 @@ internal data class AuthorEntry(
   val displayName: String
     get() = author.displayName
 
-  val shortName: String
-    get() = author.shortName
-
   val fileCount: Int
     get() = changes.size
-
-  val popupPresentableText: String
-    get() = "$displayName ($fileCount)"
 }
 
 /**
@@ -84,6 +72,7 @@ internal data class AuthorEntry(
 internal class GitCompareWithRefAuthorIndex private constructor(
   val allChanges: List<Change>,
   val authors: List<AuthorEntry>,
+  val currentUserKey: String? = null,
 ) {
   private val authorByKey: Map<String, AuthorEntry> = authors.associateBy { it.key }
 
@@ -91,32 +80,15 @@ internal class GitCompareWithRefAuthorIndex private constructor(
     if (selectedAuthorKeys.isEmpty()) {
       return allChanges
     }
-    val matchedSet = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Change, Boolean>())
-    val matchedFallback = HashSet<Change>()
+    val matched = HashSet<Change>()
     for (key in selectedAuthorKeys) {
       val entry = authorByKey[key] ?: continue
-      for (change in entry.changes) {
-        matchedSet.add(change)
-        matchedFallback.add(change)
-      }
+      matched.addAll(entry.changes)
     }
-    return allChanges.filter { it in matchedSet || it in matchedFallback }
+    return allChanges.filter { it in matched }
   }
 
-  fun findAuthor(key: String): AuthorEntry? = authorByKey[key]
-
   companion object {
-    private const val MAX_TOOLBAR_NAME_LENGTH = 20
-
-    fun formatToolbarAuthorName(name: String): String {
-      return if (name.length > MAX_TOOLBAR_NAME_LENGTH) {
-        "${name.substring(0, MAX_TOOLBAR_NAME_LENGTH)}\u2026"
-      }
-      else {
-        name
-      }
-    }
-
     @Throws(VcsException::class)
     fun loadForCompare(
       project: Project,
@@ -173,7 +145,7 @@ internal class GitCompareWithRefAuthorIndex private constructor(
       currentUser: GitCompareAuthor?,
     ): GitCompareWithRefAuthorIndex {
       if (diffChanges.isEmpty()) {
-        return GitCompareWithRefAuthorIndex(emptyList(), emptyList())
+        return GitCompareWithRefAuthorIndex(emptyList(), emptyList(), currentUser?.key)
       }
 
       val adjacency = HashMap<String, MutableSet<String>>()
@@ -250,7 +222,7 @@ internal class GitCompareWithRefAuthorIndex private constructor(
           .thenBy { it.displayName }
       )
 
-      return GitCompareWithRefAuthorIndex(diffChanges, entries)
+      return GitCompareWithRefAuthorIndex(diffChanges, entries, currentUser?.key)
     }
 
     private fun changeToPathPair(rootPath: String, change: Change): PathPair {

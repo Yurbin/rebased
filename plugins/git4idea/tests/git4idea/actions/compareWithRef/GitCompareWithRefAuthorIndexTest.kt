@@ -10,7 +10,7 @@ class GitCompareWithRefAuthorIndexTest {
   @Test
   fun `orders authors by file count descending then display name ascending`() {
     val scenario = createDemoScenario(rootPath)
-    val presentableList = scenario.index.authors.map { it.popupPresentableText }
+    val summaryList = scenario.index.authors.map { "${it.displayName} (${it.fileCount})" }
 
     assertEquals(
       listOf(
@@ -19,7 +19,7 @@ class GitCompareWithRefAuthorIndexTest {
         "Carol <carol@example.com> (1)",
         "Dev <dev@example.com> (1)",
       ),
-      presentableList,
+      summaryList,
     )
   }
 
@@ -63,7 +63,7 @@ class GitCompareWithRefAuthorIndexTest {
     assertEquals(1, index.authors.size)
     val entry = index.authors.single()
     assertEquals("(uncommitted)", entry.displayName)
-    assertEquals("(uncommitted) (1)", entry.popupPresentableText)
+    assertEquals(1, entry.fileCount)
     assertEquals(listOf(dirtyChange), index.filterChanges(setOf(entry.key)))
   }
 
@@ -81,7 +81,7 @@ class GitCompareWithRefAuthorIndexTest {
     assertEquals(1, index.authors.size)
     val entry = index.authors.single()
     assertEquals("(unknown)", entry.displayName)
-    assertEquals("(unknown) (1)", entry.popupPresentableText)
+    assertEquals(1, entry.fileCount)
     assertEquals(listOf(mergeOnlyChange), index.filterChanges(setOf(entry.key)))
   }
 
@@ -125,12 +125,5 @@ class GitCompareWithRefAuthorIndexTest {
       """.trimIndent(),
       GitCompareWithRefExporter.exportChangesByType(rootPath, unionChanges),
     )
-  }
-
-  @Test
-  fun `truncates toolbar author name longer than 20 characters`() {
-    assertEquals("Short Name", GitCompareWithRefAuthorIndex.formatToolbarAuthorName("Short Name"))
-    assertEquals("12345678901234567890", GitCompareWithRefAuthorIndex.formatToolbarAuthorName("12345678901234567890"))
-    assertEquals("12345678901234567890\u2026", GitCompareWithRefAuthorIndex.formatToolbarAuthorName("123456789012345678901"))
   }
 }

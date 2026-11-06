@@ -5,22 +5,15 @@ import com.intellij.icons.AllIcons
 import com.intellij.ide.ActivityTracker
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DataKey
 import com.intellij.openapi.actionSystem.DataSink
-import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.IdeActions
-import com.intellij.openapi.actionSystem.KeepPopupOnPerform
-import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
-import com.intellij.openapi.actionSystem.Presentation
 import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.actionSystem.UiDataProvider
 import com.intellij.openapi.actionSystem.ex.ActionUtil
-import com.intellij.openapi.actionSystem.ex.CustomComponentAction
-import com.intellij.openapi.actionSystem.impl.ActionButtonWithText
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.fileEditor.FileDocumentManager
@@ -30,10 +23,8 @@ import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbAwareAction
-import com.intellij.openapi.project.DumbAwareToggleAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogBuilder
-import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.NlsContexts
@@ -59,7 +50,6 @@ import git4idea.actions.GitCompareWithRefAction
 import git4idea.repo.GitRepository
 import java.awt.BorderLayout
 import java.awt.datatransfer.StringSelection
-import javax.swing.JComponent
 import javax.swing.JPanel
 
 /**
@@ -77,14 +67,18 @@ internal class GitCompareWithRefChangesPanel private constructor(
 
   private var allLoadedChanges: List<Change> = emptyList()
   private var currentDisplayedChanges: List<Change> = emptyList()
-  private var authorState: AuthorState = AuthorState.Loading
-  private val selectedAuthorKeys: MutableSet<String> = LinkedHashSet()
+  internal var authorState: AuthorState = AuthorState.Loading
+    private set
+  internal var filterValues: List<String> = emptyList()
+    private set
+  private val filterComponents = ArrayList<GitCompareWithRefUserFilterComponent>()
 
   private var activeAuthorIndicator: ProgressIndicator? = null
   private var loadGeneration: Int = 0
   private var isPanelDisposed: Boolean = false
 
   init {
+    changesBrowser.panel = this
     Disposer.register(this, changesBrowser)
     add(loadingPanel, BorderLayout.CENTER)
   }
@@ -92,9 +86,27 @@ internal class GitCompareWithRefChangesPanel private constructor(
   override fun dispose() {
     isPanelDisposed = true
     cancelAuthorLoading()
+    filterComponents.clear()
   }
 
   fun getChangesBrowser(): ChangesBrowserBase = changesBrowser
+
+  internal fun registerFilterComponent(component: GitCompareWithRefUserFilterComponent) {
+    if (component !in filterComponents) {
+      filterComponents.add(component)
+    }
+  }
+
+  internal fun isUserFilterEnabled(): Boolean {
+    val state = authorState
+    return state is AuthorState.Ready && (state.index.authors.isNotEmpty() || filterValues.isNotEmpty())
+  }
+
+  @RequiresEdt
+  internal fun updateFilterValues(values: List<String>) {
+    filterValues = values.toList()
+    applyAuthorFilter(expandAll = true)
+  }
 
   @RequiresEdt
   fun reloadChanges() {
@@ -102,7 +114,7 @@ internal class GitCompareWithRefChangesPanel private constructor(
     val generation = loadGeneration
     cancelAuthorLoading()
     authorState = AuthorState.Loading
-    ActivityTracker.getInstance().inc()
+    notifyFilterComponents()
 
     loadingPanel.loadChangesInBackground(
       { GitCompareWithRefAction.getDiffChanges(repository, file, refToCompare) },
@@ -121,7 +133,6 @@ internal class GitCompareWithRefChangesPanel private constructor(
     changesBrowser.setChangesToDisplay(changeList)
 
     if (changeList.isEmpty()) {
-      selectedAuthorKeys.clear()
       val emptyIndex = GitCompareWithRefAuthorIndex.build(
         rootPath = repository.root.path,
         diffChanges = emptyList(),
@@ -130,7 +141,7 @@ internal class GitCompareWithRefChangesPanel private constructor(
         currentUser = null,
       )
       authorState = AuthorState.Ready(emptyIndex)
-      ActivityTracker.getInstance().inc()
+      notifyFilterComponents()
       return
     }
 
@@ -171,34 +182,40 @@ internal class GitCompareWithRefChangesPanel private constructor(
 
   @RequiresEdt
   private fun onAuthorIndexLoaded(index: GitCompareWithRefAuthorIndex) {
-    val availableKeys = index.authors.mapTo(HashSet()) { it.key }
-    selectedAuthorKeys.retainAll(availableKeys)
     authorState = AuthorState.Ready(index)
-    applyAuthorFilter()
-    ActivityTracker.getInstance().inc()
+    applyAuthorFilter(expandAll = false)
   }
 
   @RequiresEdt
   private fun onAuthorIndexFailed(error: Throwable) {
-    selectedAuthorKeys.clear()
     val reason = error.localizedMessage?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
     authorState = AuthorState.Failed(reason)
     currentDisplayedChanges = allLoadedChanges
     changesBrowser.setChangesToDisplay(allLoadedChanges)
-    ActivityTracker.getInstance().inc()
+    notifyFilterComponents()
   }
 
   @RequiresEdt
-  private fun applyAuthorFilter() {
+  private fun applyAuthorFilter(expandAll: Boolean) {
     val state = authorState
     val filtered = if (state is AuthorState.Ready) {
-      state.index.filterChanges(selectedAuthorKeys)
+      GitCompareWithRefUserFilter(state.index).filterChanges(filterValues)
     }
     else {
       allLoadedChanges
     }
     currentDisplayedChanges = filtered
     changesBrowser.setChangesToDisplay(filtered)
+    if (expandAll) {
+      changesBrowser.viewer.requestRefresh { changesBrowser.viewer.expandAll() }
+    }
+    notifyFilterComponents()
+  }
+
+  private fun notifyFilterComponents() {
+    for (component in filterComponents) {
+      component.refreshUiState()
+    }
     ActivityTracker.getInstance().inc()
   }
 
@@ -211,13 +228,15 @@ internal class GitCompareWithRefChangesPanel private constructor(
     sink[DATA_KEY] = this
   }
 
-  private sealed interface AuthorState {
+  internal sealed interface AuthorState {
     data object Loading : AuthorState
     data class Ready(val index: GitCompareWithRefAuthorIndex) : AuthorState
     data class Failed(val reason: String) : AuthorState
   }
 
   private class MyChangesBrowser(project: Project) : SimpleAsyncChangesBrowser(project, false, true), Disposable {
+    var panel: GitCompareWithRefChangesPanel? = null
+
     init {
       hideViewerBorder()
       myViewer.setTreeStateStrategy(ChangesTree.KEEP_NON_EMPTY)
@@ -234,7 +253,7 @@ internal class GitCompareWithRefChangesPanel private constructor(
       actions.add(MyGetVersionAction())
       actions.add(MyCopyPathsAction())
       actions.add(Separator.getInstance())
-      actions.add(MyUserFilterAction())
+      actions.add(GitCompareWithRefUserFilterAction { panel })
       return actions
     }
 
@@ -351,130 +370,6 @@ internal class GitCompareWithRefChangesPanel private constructor(
         "",
         GitCompareWithRefBundle.message("copy.paths.notification", changes.size, panel.refToCompare.name),
       )
-    }
-  }
-
-  private class MyUserFilterAction : DumbAwareAction(), CustomComponentAction {
-    override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
-
-    override fun createCustomComponent(presentation: Presentation, place: String): JComponent {
-      return object : ActionButtonWithText(this, presentation, place, ActionToolbar.DEFAULT_MINIMUM_BUTTON_SIZE) {
-        init {
-          presentation.addPropertyChangeListener { evt ->
-            if (evt.propertyName == Presentation.PROP_TEXT || evt.propertyName == Presentation.PROP_DESCRIPTION) {
-              updateToolTipText()
-              revalidate()
-              repaint()
-            }
-          }
-        }
-
-        override fun shallPaintDownArrow(): Boolean = true
-      }
-    }
-
-    override fun update(e: AnActionEvent) {
-      val panel = e.getData(DATA_KEY)
-      if (panel == null) {
-        e.presentation.isEnabledAndVisible = false
-        return
-      }
-      e.presentation.isVisible = true
-      e.presentation.isPopupGroup = true
-
-      when (val state = panel.authorState) {
-        is AuthorState.Loading -> {
-          e.presentation.isEnabled = false
-          e.presentation.text = GitCompareWithRefBundle.message("user.filter.text")
-          e.presentation.description = GitCompareWithRefBundle.message("user.filter.loading")
-        }
-        is AuthorState.Failed -> {
-          e.presentation.isEnabled = false
-          e.presentation.text = GitCompareWithRefBundle.message("user.filter.text")
-          e.presentation.description = GitCompareWithRefBundle.message("user.filter.failed", state.reason)
-        }
-        is AuthorState.Ready -> {
-          val index = state.index
-          e.presentation.isEnabled = index.authors.isNotEmpty()
-          e.presentation.description = GitCompareWithRefBundle.message("user.filter.description")
-          val selectedKeys = panel.selectedAuthorKeys
-          e.presentation.text = when (selectedKeys.size) {
-            0 -> GitCompareWithRefBundle.message("user.filter.text")
-            1 -> {
-              val key = selectedKeys.first()
-              val shortName = index.findAuthor(key)?.shortName ?: key
-              val truncated = GitCompareWithRefAuthorIndex.formatToolbarAuthorName(shortName)
-              GitCompareWithRefBundle.message("user.filter.text.single", truncated)
-            }
-            else -> GitCompareWithRefBundle.message("user.filter.text.multiple", selectedKeys.size)
-          }
-        }
-      }
-    }
-
-    override fun actionPerformed(e: AnActionEvent) {
-      val panel = e.getData(DATA_KEY) ?: return
-      val state = panel.authorState as? AuthorState.Ready ?: return
-      val index = state.index
-      if (index.authors.isEmpty()) return
-
-      val group = DefaultActionGroup()
-      group.add(object : DumbAwareToggleAction(GitCompareWithRefBundle.message("user.filter.all")) {
-        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
-
-        override fun update(e: AnActionEvent) {
-          super.update(e)
-          e.presentation.keepPopupOnPerform = KeepPopupOnPerform.Never
-        }
-
-        override fun isSelected(e: AnActionEvent): Boolean = panel.selectedAuthorKeys.isEmpty()
-
-        override fun setSelected(e: AnActionEvent, selected: Boolean) {
-          if (selected || panel.selectedAuthorKeys.isNotEmpty()) {
-            panel.selectedAuthorKeys.clear()
-            panel.applyAuthorFilter()
-          }
-        }
-      })
-      group.add(Separator.getInstance())
-
-      for (authorEntry in index.authors) {
-        group.add(object : DumbAwareToggleAction(authorEntry.popupPresentableText) {
-          override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
-
-          override fun update(e: AnActionEvent) {
-            super.update(e)
-            e.presentation.keepPopupOnPerform = KeepPopupOnPerform.Always
-          }
-
-          override fun isSelected(e: AnActionEvent): Boolean = authorEntry.key in panel.selectedAuthorKeys
-
-          override fun setSelected(e: AnActionEvent, selected: Boolean) {
-            if (selected) {
-              panel.selectedAuthorKeys.add(authorEntry.key)
-            }
-            else {
-              panel.selectedAuthorKeys.remove(authorEntry.key)
-            }
-            panel.applyAuthorFilter()
-          }
-        })
-      }
-
-      val popup = JBPopupFactory.getInstance().createActionGroupPopup(
-        null,
-        group,
-        e.dataContext,
-        JBPopupFactory.ActionSelectionAid.SPEEDSEARCH,
-        true,
-      )
-      val component = e.inputEvent?.component ?: e.getData(PlatformCoreDataKeys.CONTEXT_COMPONENT)
-      if (component != null) {
-        popup.showUnderneathOf(component)
-      }
-      else {
-        popup.showInBestPositionFor(e.dataContext)
-      }
     }
   }
 
