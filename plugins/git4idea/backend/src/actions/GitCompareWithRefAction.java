@@ -7,6 +7,7 @@ import com.intellij.dvcs.ui.DvcsBundle;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.popup.JBPopup;
 import com.intellij.openapi.vcs.FilePath;
+import com.intellij.openapi.vcs.VcsBundle;
 import com.intellij.openapi.vcs.VcsException;
 import com.intellij.openapi.vcs.changes.Change;
 import com.intellij.openapi.vcs.changes.ContentRevision;
@@ -19,6 +20,7 @@ import git4idea.GitReference;
 import git4idea.GitRevisionNumber;
 import git4idea.GitTag;
 import git4idea.GitUtil;
+import git4idea.actions.compareWithRef.GitCompareWithRefChangesPanel;
 import git4idea.changes.GitChangeUtils;
 import git4idea.history.GitHistoryUtils;
 import git4idea.i18n.GitBundle;
@@ -87,6 +89,12 @@ public class GitCompareWithRefAction extends DvcsCompareWithAction<GitRepository
     String presentableRevisionName = getPresentableCurrentBranchName(repository);
     String revNumTitle1 = VcsDiffUtil.getRevisionTitle(reference.getName(), false);
     String revNumTitle2 = VcsDiffUtil.getRevisionTitle(presentableRevisionName, true);
+    if (file.isDirectory()) {
+      String dialogTitle = VcsBundle.message("history.dialog.title.difference.between.versions.in",
+                                             revNumTitle1, revNumTitle2, file.getName());
+      GitCompareWithRefChangesPanel.showChanges(repository, file, reference, dialogTitle);
+      return;
+    }
     showDiffBetweenRevision(repository.getProject(), file, revNumTitle1, revNumTitle2, () -> getDiffChanges(repository, file, reference));
   }
 
